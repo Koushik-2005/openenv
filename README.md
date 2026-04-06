@@ -1,3 +1,13 @@
+---
+title: Email Triage Environment
+emoji: 📧
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_file: server.py
+pinned: false
+---
+
 # Email Triage Environment - OpenEnv v1.0
 
 A real-world **email triage and classification environment** for training and evaluating AI agents using the OpenEnv standard.
