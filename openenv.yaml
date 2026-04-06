@@ -1,0 +1,164 @@
+name: email-triage-v1
+version: "1.0.0"
+description: |
+  Real-world email triage environment where AI agents learn to classify and route incoming emails.
+  Agents must handle spam detection, prioritization, and smart routing to different departments.
+  This environment measures success through accuracy, confidence calibration, and efficiency.
+
+author: OpenEnv Community
+license: MIT
+
+# Environment entrypoint
+env:
+  module: email_triage_env.environment
+  name: EmailTriageEnv
+
+# Observation space definition
+observation:
+  type: object
+  required: [current_email, inbox_size, processed_count, episode_step, task_description]
+  properties:
+    current_email:
+      type: object
+      description: The email to classify
+      properties:
+        id:
+          type: string
+          description: Unique email identifier
+        sender:
+          type: string
+          description: Email sender address
+        subject:
+          type: string
+          description: Email subject line
+        body:
+          type: string
+          description: Email body content
+        timestamp:
+          type: string
+          description: ISO 8601 timestamp
+        is_internal:
+          type: boolean
+          description: Whether sender is internal
+        has_attachment:
+          type: boolean
+          description: Whether email has attachments
+        word_count:
+          type: integer
+          description: Number of words in body
+    inbox_size:
+      type: integer
+      description: Total emails in inbox this episode
+    processed_count:
+      type: integer
+      description: Number of emails processed so far
+    episode_step:
+      type: integer
+      description: Current step number
+    task_description:
+      type: string
+      description: Description of the current task
+
+# Action space definition
+action:
+  type: object
+  required: [classification, confidence, needs_response]
+  properties:
+    classification:
+      type: string
+      enum: ["spam", "urgent", "important", "routine"]
+      description: Email classification category
+    confidence:
+      type: number
+      minimum: 0.0
+      maximum: 1.0
+      description: Confidence in classification (0.0-1.0)
+    needs_response:
+      type: boolean
+      description: Whether email requires response
+    route_to:
+      type: string
+      enum: ["support", "sales", "engineering", "hr", null]
+      description: Optional routing destination
+
+# Reward definition
+reward:
+  type: number
+  minimum: 0.0
+  maximum: 1.0
+  description: Step reward (0.0-1.0) based on classification accuracy, confidence calibration, and routing
+
+# Tasks
+tasks:
+  - name: "binary_easy"
+    description: "Binary classification (spam vs legitimate) on obvious cases"
+    difficulty: easy
+    task_type: binary
+    max_steps: 10
+    target_score: 0.85
+    criteria:
+      - "Classify emails as spam or legitimate"
+      - "Minimum 85% accuracy required"
+      - "Simple, obvious cases with few edge cases"
+
+  - name: "multiclass_medium"
+    description: "Multi-class classification (spam/urgent/important/routine) with moderate difficulty"
+    difficulty: medium
+    task_type: multiclass
+    max_steps: 20
+    target_score: 0.70
+    criteria:
+      - "Classify emails into 4 categories"
+      - "Minimum 70% accuracy required"
+      - "Some ambiguous cases to challenge agents"
+      - "Confidence calibration important"
+
+  - name: "routing_hard"
+    description: "Full task: classify AND route emails to correct departments"
+    difficulty: hard
+    task_type: routing
+    max_steps: 20
+    target_score: 0.55
+    criteria:
+      - "Classify emails and route to department"
+      - "Minimum 55% accuracy required"
+      - "Difficult edge cases and imbalanced distribution"
+      - "Routing adds complexity"
+
+# API endpoints
+api:
+  reset:
+    description: "Reset environment and return initial observation"
+    method: "POST"
+    request: "{}"
+    response:
+      observation: Observation
+      done: boolean
+      info: object
+
+  step:
+    description: "Execute action and get next observation, reward, done, info"
+    method: "POST"
+    request: Action
+    response:
+      observation: Observation
+      reward: float
+      done: boolean
+      info: object
+
+  state:
+    description: "Get current environment state"
+    method: "GET"
+    response:
+      type: object
+      properties:
+        current_step: integer
+        total_reward: float
+        accuracy: float
+
+  close:
+    description: "Close environment"
+    method: "POST"
+    request: "{}"
+    response:
+      status: string
