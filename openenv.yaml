@@ -1,3 +1,4 @@
+spec_version: 1
 name: email-triage-v1
 version: "1.0.0"
 description: |
@@ -90,35 +91,71 @@ reward:
 
 # Tasks
 tasks:
-  - name: "binary_easy"
+  - id: binary_easy
+    name: "binary_easy"
     description: "Binary classification (spam vs legitimate) on obvious cases"
     difficulty: easy
     task_type: binary
+    max_turns: 10
     max_steps: 10
     target_score: 0.85
+    grader:
+      type: accuracy_threshold
+      description: "Pass if accuracy reaches threshold; score is normalized to [0.0, 1.0]."
+      success_threshold: 0.85
+      scoring:
+        method: weighted_accuracy_efficiency
+        range: [0.0, 1.0]
+        weights:
+          accuracy: 0.7
+          efficiency: 0.3
     criteria:
       - "Classify emails as spam or legitimate"
       - "Minimum 85% accuracy required"
       - "Simple, obvious cases with few edge cases"
 
-  - name: "multiclass_medium"
+  - id: multiclass_medium
+    name: "multiclass_medium"
     description: "Multi-class classification (spam/urgent/important/routine) with moderate difficulty"
     difficulty: medium
     task_type: multiclass
+    max_turns: 20
     max_steps: 20
     target_score: 0.70
+    grader:
+      type: accuracy_threshold
+      description: "Pass if accuracy reaches threshold; score is normalized to [0.0, 1.0]."
+      success_threshold: 0.70
+      scoring:
+        method: weighted_accuracy_efficiency
+        range: [0.0, 1.0]
+        weights:
+          accuracy: 0.7
+          efficiency: 0.3
     criteria:
       - "Classify emails into 4 categories"
       - "Minimum 70% accuracy required"
       - "Some ambiguous cases to challenge agents"
       - "Confidence calibration important"
 
-  - name: "routing_hard"
+  - id: routing_hard
+    name: "routing_hard"
     description: "Full task: classify AND route emails to correct departments"
     difficulty: hard
     task_type: routing
+    max_turns: 20
     max_steps: 20
     target_score: 0.55
+    grader:
+      type: accuracy_threshold
+      description: "Pass if accuracy reaches threshold; score is normalized to [0.0, 1.0]."
+      success_threshold: 0.55
+      scoring:
+        method: weighted_accuracy_efficiency
+        range: [0.0, 1.0]
+        weights:
+          accuracy: 0.7
+          efficiency: 0.3
     criteria:
       - "Classify emails and route to department"
       - "Minimum 55% accuracy required"

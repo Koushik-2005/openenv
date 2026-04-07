@@ -46,6 +46,12 @@ class EmailTriageEnv:
             "routing": "Classify emails AND route them to the correct department (support, sales, engineering, hr). Misrouting is costly.",
         }
 
+    def _normalize_ground_truth(self, label: str) -> str:
+        """Map simulator labels to the action-space labels used by this environment."""
+        if self.task == "binary" and label == "legitimate":
+            return "routine"
+        return label
+
     async def reset(self) -> dict:
         """
         Reset environment and start new episode.
@@ -67,7 +73,7 @@ class EmailTriageEnv:
         )
 
         initial_email, ground_truth = self.emails[0]
-        self.ground_truth.append(ground_truth)
+        self.ground_truth.append(self._normalize_ground_truth(ground_truth))
 
         observation = Observation(
             current_email=initial_email,
@@ -95,6 +101,7 @@ class EmailTriageEnv:
 
         # Get ground truth for current email
         _, true_classification = self.emails[self.current_step - 1]
+        true_classification = self._normalize_ground_truth(true_classification)
 
         # Compute reward for this action
         reward = self.reward_engine.compute_step_reward(
@@ -117,7 +124,7 @@ class EmailTriageEnv:
             next_email = None
         else:
             next_email, next_ground_truth = self.emails[self.current_step]
-            self.ground_truth.append(next_ground_truth)
+            self.ground_truth.append(self._normalize_ground_truth(next_ground_truth))
 
         observation = Observation(
             current_email=next_email,

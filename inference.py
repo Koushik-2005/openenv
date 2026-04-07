@@ -3,13 +3,14 @@
 Baseline Inference Script for Email Triage Environment
 ========================================================
 
-Uses OpenAI Chat API to run an agent against the environment.
-Outputs structured logs in [START], [STEP], [END] format.
+Runs and grades all hackathon tasks by default.
+Outputs structured logs in [START], [STEP], [END] format for each task.
 
 Environment Variables:
   - API_BASE_URL (default: https://router.huggingface.co/v1)
   - MODEL_NAME (default: Qwen/Qwen2.5-72B-Instruct)
-  - HF_TOKEN or OPENAI_API_KEY (required)
+    - HF_TOKEN or OPENAI_API_KEY (optional; uses deterministic fallback if missing)
+    - TASK_NAME (optional; run a single task id like binary_easy, otherwise runs all)
 """
 
 import asyncio
@@ -33,16 +34,31 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 
-if not API_KEY:
-    print("[ERROR] Missing API key. Set HF_TOKEN or OPENAI_API_KEY.", file=sys.stderr)
-    sys.exit(1)
-
 # Task configuration
-TASK_NAME = os.getenv("TASK_NAME", "multiclass_medium")
+TASK_NAME = os.getenv("TASK_NAME", "all")
 BENCHMARK = os.getenv("BENCHMARK", "email-triage-v1")
-MAX_STEPS = 20
 TEMPERATURE = 0.7
 MAX_TOKENS = 200
+TASKS = [
+    {
+        "task_id": "binary_easy",
+        "task_type": "binary",
+        "difficulty": "easy",
+        "max_steps": 10,
+    },
+    {
+        "task_id": "multiclass_medium",
+        "task_type": "multiclass",
+        "difficulty": "medium",
+        "max_steps": 20,
+    },
+    {
+        "task_id": "routing_hard",
+        "task_type": "routing",
+        "difficulty": "hard",
+        "max_steps": 20,
+    },
+]
 
 # Parse task name: format is "task_type_difficulty" or "task_difficulty"
 def parse_task_name(name: str):
@@ -52,21 +68,20 @@ def parse_task_name(name: str):
         task_type, difficulty = parts
         if task_type in ["binary", "multiclass", "routing"]:
             return task_type, difficulty
-        # Try as all task_type
-        task_type_full = name.rsplit("_", 1)[0]
-        if "_" in task_type_full:
-            return task_type_full.split("_")[0], parts[-1]
+    if name in ["binary", "multiclass", "routing"]:
+        return name, "medium"
     return "multiclass", "medium"
 
-TASK_TYPE, DIFFICULTY = parse_task_name(TASK_NAME)
 
-SYSTEM_PROMPT = textwrap.dedent(
-    f"""
+def build_system_prompt(task_name: str, task_type: str, difficulty: str) -> str:
+    """Build task-specific system prompt."""
+    return textwrap.dedent(
+        f"""
     You are an email triage AI agent. Your task is to classify incoming emails and route them appropriately.
     
-    Current Task: {TASK_NAME}
-    Task Type: {TASK_TYPE}
-    Difficulty: {DIFFICULTY}
+    Current Task: {task_name}
+    Task Type: {task_type}
+    Difficulty: {difficulty}
     
     Email Classification Categories:
     - "spam": Unsolicited, malicious, or unwanted emails
@@ -90,7 +105,26 @@ SYSTEM_PROMPT = textwrap.dedent(
     Reply ONLY with a JSON object, no other text. Example:
     {{"classification": "urgent", "confidence": 0.95, "needs_response": true, "route_to": "support"}}
     """
-).strip()
+    ).strip()
+
+
+def select_tasks(task_name: str) -> list[dict]:
+    """Return selected task configs. Defaults to all tasks for validator compatibility."""
+    normalized = (task_name or "").strip().lower()
+    if normalized in {"", "all", "*", "all_tasks"}:
+        return TASKS
+
+    for task in TASKS:
+        if task["task_id"] == normalized:
+            return [task]
+
+    parsed_type, parsed_difficulty = parse_task_name(normalized)
+    for task in TASKS:
+        if task["task_type"] == parsed_type and task["difficulty"] == parsed_difficulty:
+            return [task]
+
+    print(f"[DEBUG] Unknown TASK_NAME='{task_name}', running all tasks.", file=sys.stderr)
+    return TASKS
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -179,26 +213,139 @@ def parse_model_response(response_text: str) -> Optional[dict]:
         return None
 
 
-async def run_episode() -> tuple[bool, float, int, list]:
+def heuristic_action(email_data: dict, task_type: str) -> dict:
+    """Deterministic fallback policy when no API key/model call is available."""
+    text = f"{email_data.get('subject', '')} {email_data.get('body', '')}".lower()
+
+    spam_keywords = [
+        "free",
+        "winner",
+        "click",
+        "offer",
+        "money",
+        "dating",
+        "work from home",
+        "act now",
+    ]
+    urgent_keywords = [
+        "urgent",
+        "critical",
+        "immediate",
+        "asap",
+        "security breach",
+        "production",
+        "down",
+        "escalation",
+    ]
+    important_keywords = [
+        "proposal",
+        "review",
+        "meeting",
+        "roadmap",
+        "planning",
+        "project",
+        "approved",
+    ]
+
+    if any(k in text for k in spam_keywords):
+        classification = "spam"
+        confidence = 0.85
+    elif any(k in text for k in urgent_keywords):
+        classification = "urgent"
+        confidence = 0.8
+    elif any(k in text for k in important_keywords):
+        classification = "important"
+        confidence = 0.7
+    else:
+        classification = "routine"
+        confidence = 0.6
+
+    # Binary mode is spam vs non-spam in this environment; map non-spam to routine.
+    if task_type == "binary" and classification != "spam":
+        classification = "routine"
+
+    route_to = None
+    if classification != "spam" and task_type == "routing":
+        sender = (email_data.get("sender") or "").lower()
+        if "support" in text or "issue" in text or "ticket" in text:
+            route_to = "support"
+        elif "sales" in text or "proposal" in text or "pricing" in text:
+            route_to = "sales"
+        elif "bug" in text or "api" in text or "engineering" in text:
+            route_to = "engineering"
+        elif "hr" in text or "policy" in text or "leave" in text or "benefit" in text:
+            route_to = "hr"
+        elif sender.endswith("@company.com"):
+            route_to = "engineering"
+
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "needs_response": classification in {"urgent", "important"},
+        "route_to": route_to,
+    }
+
+
+def get_action(
+    client: Optional[OpenAI],
+    model_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    email_data: dict,
+    task_type: str,
+) -> tuple[dict, Optional[str]]:
+    """Return action dict and optional error string."""
+    if client is None:
+        return heuristic_action(email_data, task_type), "null"
+
+    try:
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            timeout=30,
+        )
+
+        response_text = (completion.choices[0].message.content or "").strip()
+        action_dict = parse_model_response(response_text)
+        if action_dict is None:
+            return heuristic_action(email_data, task_type), "parse_error"
+        return action_dict, "null"
+    except Exception as e:
+        print(f"[DEBUG] Model call failed: {e}", file=sys.stderr)
+        return heuristic_action(email_data, task_type), str(e)
+
+
+async def run_single_task(task_cfg: dict, client: Optional[OpenAI]) -> tuple[bool, float, int, list]:
     """
-    Run one complete episode.
-    Returns: (success, score, total_steps, rewards)
+    Run one complete episode for a specific task.
+    Returns: (success, score, steps, rewards)
     """
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    task_name = task_cfg["task_id"]
+    task_type = task_cfg["task_type"]
+    difficulty = task_cfg["difficulty"]
+    max_steps = int(task_cfg["max_steps"])
+    system_prompt = build_system_prompt(task_name, task_type, difficulty)
     
     # Initialize environment
     env = EmailTriageEnv(
-        task=TASK_TYPE,
-        difficulty=DIFFICULTY,
-        max_steps=MAX_STEPS,
+        task=task_type,
+        difficulty=difficulty,
+        max_steps=max_steps,
     )
     
     history = []
     rewards = []
     steps_taken = 0
-    last_error = None
+    success = False
+    score = 0.0
+    last_error: Optional[str] = None
 
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
         # Reset environment
@@ -208,47 +355,27 @@ async def run_episode() -> tuple[bool, float, int, list]:
         if current_obs is None or current_obs.current_email is None:
             raise RuntimeError("Failed to reset environment")
 
-        for step in range(1, MAX_STEPS + 1):
+        for step in range(1, max_steps + 1):
             if current_obs is None or current_obs.current_email is None:
                 break
 
-            email_data = current_obs.current_email.dict()
+            if hasattr(current_obs.current_email, "model_dump"):
+                email_data = current_obs.current_email.model_dump()
+            else:
+                email_data = current_obs.current_email.dict()
             
             # Get model response
             user_prompt = build_user_prompt(step, email_data, history)
-            
-            try:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=TEMPERATURE,
-                    max_tokens=MAX_TOKENS,
-                    timeout=30,
-                )
-                
-                response_text = (completion.choices[0].message.content or "").strip()
-                action_dict = parse_model_response(response_text)
-                
-                if action_dict is None:
-                    action_dict = {
-                        "classification": "routine",
-                        "confidence": 0.3,
-                        "needs_response": False,
-                        "route_to": None,
-                    }
-                
-            except Exception as e:
-                last_error = str(e)
-                print(f"[DEBUG] Model call failed: {e}", file=sys.stderr)
-                action_dict = {
-                    "classification": "routine",
-                    "confidence": 0.1,
-                    "needs_response": False,
-                    "route_to": None,
-                }
+            action_dict, error_text = get_action(
+                client=client,
+                model_name=MODEL_NAME,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                email_data=email_data,
+                task_type=task_type,
+            )
+            if error_text and error_text != "null":
+                last_error = error_text
 
             # Create action
             action = Action(**action_dict)
@@ -262,14 +389,21 @@ async def run_episode() -> tuple[bool, float, int, list]:
             except Exception as e:
                 last_error = str(e)
                 reward = 0.0
-                done = False
+                done = True
 
             rewards.append(reward)
             steps_taken = step
 
-            log_step(step=step, action=action_str, reward=reward, done=done, error=last_error)
+            log_step(
+                step=step,
+                action=action_str,
+                reward=reward,
+                done=done,
+                error=last_error,
+            )
 
             history.append(f"Step {step}: {action_str}, reward={reward:.2f}")
+            last_error = None
 
             # Get next observation
             if not done:
@@ -285,9 +419,8 @@ async def run_episode() -> tuple[bool, float, int, list]:
 
     except Exception as e:
         print(f"[DEBUG] Episode error: {e}", file=sys.stderr)
-        success = False
-        score = 0.0
-        steps_taken = 0
+        if steps_taken == 0:
+            steps_taken = 1
 
     finally:
         try:
@@ -300,13 +433,32 @@ async def run_episode() -> tuple[bool, float, int, list]:
     return success, score, steps_taken, rewards
 
 
+async def run_all_tasks() -> tuple[bool, float]:
+    """Run selected tasks (defaults to all 3 tasks for hackathon validator compatibility)."""
+    selected_tasks = select_tasks(TASK_NAME)
+    client: Optional[OpenAI] = None
+
+    if API_KEY:
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    else:
+        print("[DEBUG] No API key found, using deterministic fallback policy.", file=sys.stderr)
+
+    results = []
+    for task_cfg in selected_tasks:
+        task_success, task_score, _, _ = await run_single_task(task_cfg, client)
+        results.append((task_cfg["task_id"], task_success, task_score))
+
+    overall_success = all(s for _, s, _ in results) if results else False
+    avg_score = sum(score for _, _, score in results) / len(results) if results else 0.0
+    return overall_success, avg_score
+
+
 async def main():
     """Main entry point."""
     try:
-        success, score, steps, rewards = await run_episode()
-        
-        # Return exit code based on success
-        sys.exit(0 if success else 1)
+        await run_all_tasks()
+        # Exit 0 after successfully producing task logs.
+        sys.exit(0)
         
     except KeyboardInterrupt:
         print("[DEBUG] Interrupted by user", file=sys.stderr)

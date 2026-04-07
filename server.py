@@ -56,6 +56,60 @@ app.add_middleware(
 env: Optional[EmailTriageEnv] = None
 env_lock = asyncio.Lock()
 
+TASKS_WITH_GRADERS = [
+    {
+        "id": "binary_easy",
+        "name": "binary_easy",
+        "description": "Binary classification (spam vs legitimate) on obvious cases",
+        "difficulty": "easy",
+        "task_type": "binary",
+        "max_steps": 10,
+        "grader": {
+            "type": "accuracy_threshold",
+            "success_threshold": 0.85,
+            "scoring": {
+                "method": "weighted_accuracy_efficiency",
+                "range": [0.0, 1.0],
+                "weights": {"accuracy": 0.7, "efficiency": 0.3},
+            },
+        },
+    },
+    {
+        "id": "multiclass_medium",
+        "name": "multiclass_medium",
+        "description": "Multi-class classification with moderate difficulty",
+        "difficulty": "medium",
+        "task_type": "multiclass",
+        "max_steps": 20,
+        "grader": {
+            "type": "accuracy_threshold",
+            "success_threshold": 0.70,
+            "scoring": {
+                "method": "weighted_accuracy_efficiency",
+                "range": [0.0, 1.0],
+                "weights": {"accuracy": 0.7, "efficiency": 0.3},
+            },
+        },
+    },
+    {
+        "id": "routing_hard",
+        "name": "routing_hard",
+        "description": "Full task: classify and route emails",
+        "difficulty": "hard",
+        "task_type": "routing",
+        "max_steps": 20,
+        "grader": {
+            "type": "accuracy_threshold",
+            "success_threshold": 0.55,
+            "scoring": {
+                "method": "weighted_accuracy_efficiency",
+                "range": [0.0, 1.0],
+                "weights": {"accuracy": 0.7, "efficiency": 0.3},
+            },
+        },
+    },
+]
+
 
 async def get_or_create_env(**kwargs) -> EmailTriageEnv:
     """Get or create environment instance."""
@@ -73,7 +127,10 @@ def serialize_observation(obs: Observation) -> dict:
     
     email_dict = None
     if obs.current_email:
-        email_dict = obs.current_email.dict()
+        if hasattr(obs.current_email, "model_dump"):
+            email_dict = obs.current_email.model_dump()
+        else:
+            email_dict = obs.current_email.dict()
     
     return {
         "current_email": email_dict,
@@ -94,6 +151,50 @@ async def health_check():
     }
 
 
+@app.get("/metadata")
+async def metadata():
+    """Expose environment metadata, including task graders, for validator discovery."""
+    return {
+        "name": "email-triage-v1",
+        "version": "1.0.0",
+        "description": "Email triage and routing environment with progressive task difficulty.",
+        "scoring_range": [0.0, 1.0],
+        "tasks": TASKS_WITH_GRADERS,
+    }
+
+
+@app.get("/tasks")
+async def list_tasks():
+    """List all supported tasks with grader metadata."""
+    return {
+        "tasks": TASKS_WITH_GRADERS,
+        "count": len(TASKS_WITH_GRADERS),
+    }
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(task_id: str):
+    """Get one task by id with grader metadata."""
+    for task in TASKS_WITH_GRADERS:
+        if task["id"] == task_id or task["name"] == task_id:
+            return task
+    raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+
+@app.get("/schema")
+async def schema():
+    """Return action and observation schemas used by this environment."""
+    return {
+        "action_schema": Action.model_json_schema(),
+        "observation_schema": Observation.model_json_schema(),
+        "reward": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+    }
+
+
 @app.post("/reset")
 async def reset(request: Request):
     """
@@ -106,9 +207,20 @@ async def reset(request: Request):
     """
     try:
         # Parse query parameters
-        task = request.query_params.get("task", "multiclass")
-        difficulty = request.query_params.get("difficulty", "medium")
+        task_param = request.query_params.get("task", "multiclass").strip().lower()
+        difficulty = request.query_params.get("difficulty", "medium").strip().lower()
         max_steps = int(request.query_params.get("max_steps", "20"))
+
+        task_aliases = {
+            "binary_easy": ("binary", "easy"),
+            "multiclass_medium": ("multiclass", "medium"),
+            "routing_hard": ("routing", "hard"),
+        }
+
+        if task_param in task_aliases:
+            task, difficulty = task_aliases[task_param]
+        else:
+            task = task_param
         
         # Validate inputs
         if task not in ["binary", "multiclass", "routing"]:
